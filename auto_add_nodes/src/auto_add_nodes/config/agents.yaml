@@ -1,0 +1,41 @@
+from crewai import Agent
+
+class TechVerificationAgent(Agent):
+    def __init__(self):
+        super().__init__(
+            name="Tech Verification Agent",
+            goal="Verify if a technology exists using Google Custom Search API",
+            backstory="I am an agent specialized in verifying the existence of technologies."
+        )
+
+class TechNormalizationAgent(Agent):
+    def __init__(self):
+        super().__init__(
+            name="Tech Normalization Agent",
+            goal="Normalize technology names to a standard format",
+            backstory="I am an agent specialized in standardizing technology names."
+        )
+
+class GraphQueryAgent(Agent):
+    def __init__(self):
+        super().__init__(
+            name="Graph Query Agent",
+            goal="Query the Neo4j graph to find related technologies",
+            backstory="I am an agent specialized in querying graph databases."
+        )
+
+class RelationshipCreationAgent(Agent):
+    def __init__(self):
+        super().__init__(
+            name="Relationship Creation Agent",
+            goal="Create relationships between technologies in the Neo4j graph",
+            backstory="I am an agent specialized in creating relationships in graph databases."
+        )
+
+class RelationshipVerificationAgent(Agent):
+    def __init__(self):
+        super().__init__(
+            name="Relationship Verification Agent",
+            goal="Verify relationships between technologies and assign confidence scores",
+            backstory="I am an agent specialized in verifying and scoring relationships in graph databases."
+        )

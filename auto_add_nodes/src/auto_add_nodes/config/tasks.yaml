@@ -1,0 +1,43 @@
+from crewai import Task
+from google_search import search_technology
+from neo4j_utils import normalize_technology, query_graph, create_relationship, verify_relationship
+
+def verify_technology_task(technology):
+    return Task(
+        description=f"Verify if the technology '{technology}' exists using Google Custom Search API",
+        agent=TechVerificationAgent(),
+        expected_output="Boolean indicating if the technology exists",
+        function=search_technology
+    )
+
+def normalize_technology_task():
+    return Task(
+        description="Normalize the technology name to a standard format",
+        agent=TechNormalizationAgent(),
+        expected_output="Normalized technology name",
+        function=normalize_technology
+    )
+
+def query_graph_task():
+    return Task(
+        description="Query the Neo4j graph to find related technologies",
+        agent=GraphQueryAgent(),
+        expected_output="List of related technologies and their relationships",
+        function=query_graph
+    )
+
+def create_relationship_task():
+    return Task(
+        description="Create relationships between technologies in the Neo4j graph",
+        agent=RelationshipCreationAgent(),
+        expected_output="Success message or error if relationship creation fails",
+        function=create_relationship
+    )
+
+def verify_relationship_task():
+    return Task(
+        description="Verify relationships and assign confidence scores",
+        agent=RelationshipVerificationAgent(),
+        expected_output="Confidence score for the relationship",
+        function=verify_relationship
+    )

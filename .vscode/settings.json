@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "./auto_add_nodes/src/auto_add_nodes/tools"
+    ]
+}
