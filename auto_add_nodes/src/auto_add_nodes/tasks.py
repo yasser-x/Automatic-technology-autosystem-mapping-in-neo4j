@@ -1,21 +1,21 @@
 from crewai import Task
 from agents import TechVerificationAgent, TechNormalizationAgent, RelationshipVerificationAgent, create_graph_query_agent , GraphQueryAgent
-def verify_technology_task(agent:TechVerificationAgent, technology):
+def verify_technology_task(agent:TechVerificationAgent, technology_input):
     return Task(
-        description=f"Verify if a '{technology}'exists by searching and analyzing web content",
+        description=f"Verify if '{technology_input['value']}' exists by searching and analyzing web content",
         agent=agent,
         expected_output="Dictionary with verification result and scraped content",
-        function=agent.verify_technology,
-        input=technology
+        function=agent.verify_technology_wrapper,
+        input=technology_input
     )
 
-def normalize_technology_task(agent:TechNormalizationAgent,technology):
+def normalize_technology_task(agent:TechNormalizationAgent, technology_input):
     return Task(
         description="Normalize technology names, add them to the graph, and associate them with relevant category and use cases",
         agent=agent,
         expected_output="Normalized technology name and the id of the technology node in the graph",
         function=agent.run,
-        input=technology
+        input=technology_input
     )
 
 def query_graph_task(agent:GraphQueryAgent, technology):

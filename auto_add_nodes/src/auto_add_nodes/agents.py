@@ -17,7 +17,7 @@ import uuid
 from langchain.prompts import PromptTemplate
 from googleapiclient.errors import HttpError
 from config import character_limit
-
+import traceback
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -49,7 +49,7 @@ class TechVerificationAgent(Agent):
         super().__init__(
             name="Tech Verification Agent",
             role="Technology Verification Specialist",
-            goal="Check if technology exists in the graph and Verify if a technology exists by searching and analyzing web content",
+            goal="Verify if a technology exists by searching and analyzing web content",
             backstory="I am an agent specialized in verifying the existence of technologies by searching the web and analyzing content from the first web link to verify the technology",
             llm=llm,
             tools=[
@@ -58,12 +58,7 @@ class TechVerificationAgent(Agent):
                     func=self.verify_technology_wrapper,
                     description="Verify if a technology exists using web scraping from the first website rendered by Google custom search",
                 ), 
-                Tool(
-                name="CheckTechnologyExists",
-                func=self.check_technology_exists_wrapper,
-                description="Check if a technology already exists in the graph",
                 
-            ),
             ]
         )
     API_KEY: str = 'AIzaSyA1wGvk8SzHKM_kRw507fSTBlBsZqApB3A'
@@ -72,25 +67,9 @@ class TechVerificationAgent(Agent):
     class Config:
         arbitrary_types_allowed = True
         
-    def verify_technology_wrapper(self, input_data: Dict[str, str]) -> Dict[str, Any]:
-        tech_input = TechnologyInputDict(**input_data)
-        return self.verify_technology(tech_input.value)
-
-    def check_technology_exists_wrapper(self, input_data: Dict[str, str]) -> Tuple[bool, str]:
-        tech_input = TechnologyInputDict(**input_data)
-        return self.check_technology_exists(tech_input.value)
+    
 
     
-    def check_technology_exists(self, technology: str) -> Tuple[bool, str]:
-        with driver.session() as session:
-            result = session.run(
-                "MATCH (t:Technology {name: $name}) RETURN t",
-                name=technology
-            )
-            existing_tech = result.single()
-            if existing_tech:
-                return True, f"Technology '{technology}' already exists in the graph."
-            return False, f"Technology '{technology}' does not exist in the graph."
     @staticmethod
     def search_technology(technology: str):
         try:
@@ -110,29 +89,33 @@ class TechVerificationAgent(Agent):
             print(f"An error occurred during search: {e}")
             return None
 
-    def verify_technology(self, technology:str) -> str:
+    def fetch_content(self, url: str) -> Dict[str, Any]:
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            paragraphs = soup.select('p:not(header p, nav p, footer p)')
+            content = " ".join([p.get_text().strip() for p in paragraphs])
+            
+            return {"success": True, "content": content[:character_limit]}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def verify_technology(self, technology: str) -> Dict[str, Any]:
         try:
             search_result = self.search_technology(technology)
             if not search_result:
-                return f"Not verified: {technology} (No search results found)"
+                return {"verified": False, "message": f"Not verified: {technology} (No search results found)", "content": ""}
 
             first_result_url = search_result['link']
+            content_result = self.fetch_content(first_result_url)
+            
+            if not content_result["success"]:
+                return {"verified": False, "message": f"Verification failed: {technology} (Error fetching content: {content_result['error']})", "content": ""}
 
-            response = requests.get(first_result_url, timeout=10)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
+            content = content_result["content"]
 
-            paragraphs = soup.select('p:not(header p, nav p, footer p)')
-            content = ""
-            for paragraph in paragraphs:
-                paragraph_text = paragraph.get_text().strip()
-                if len(content) + len(paragraph_text) + 1 <= character_limit:  # +1 for space
-                    content += paragraph_text + " "
-                else:
-                    remaining_chars = character_limit - len(content)
-                    content += paragraph_text[:remaining_chars]
-                    break
-                
             prompt_template = PromptTemplate(
                 input_variables=["technology", "content"],
                 template="""
@@ -161,15 +144,25 @@ class TechVerificationAgent(Agent):
             else:
                 return {"verified": False, "message": f"Not verified: {technology}. {explanation}", "content": content}
 
-        except requests.RequestException as e:
-            return {"verified": False, "message": f"Verification inconclusive: {technology} (Error scraping webpage: {str(e)})", "content": ""}
         except Exception as e:
             return {"verified": False, "message": f"Verification failed: {technology} (Unexpected error: {str(e)})", "content": ""}
 
-    def run(self, input_data: Dict[str, str]) -> dict:
-        tech_input = TechnologyInputDict(**input_data)
-        result = self.verify_technology(tech_input.value)
-        return result
+    def verify_technology_wrapper(self, input_data: Dict[str, str]) -> Dict[str, Any]:
+        technology = input_data.get('value', '')
+        if not technology:
+            return {"verified": False, "message": "No technology name provided", "content": ""}
+        
+        return self.verify_technology(technology)
+
+    def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        technology = input_data.get('value', '')
+        if not technology:
+            return {"error": "No technology name provided"}
+        
+        verify_result = self.verify_technology(technology)        
+        return {
+            "verification": verify_result
+        }
 
         
 

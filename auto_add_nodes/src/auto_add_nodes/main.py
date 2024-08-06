@@ -19,27 +19,31 @@ def run_tech_addition_pipeline(initial_technology):
     tech_verification_agent = TechVerificationAgent(llm)
     tech_normalization_agent = TechNormalizationAgent()
     graph_query_agent = create_graph_query_agent()
-    relationship_verification_agent = RelationshipVerificationAgent()
 
-    verify_task = verify_technology_task(tech_verification_agent, initial_technology)
+    verify_task = verify_technology_task(tech_verification_agent, {
+        "type": "technology_name",
+        "value": initial_technology
+    })
+    
     def normalize_with_context(agent, task_input):
         verification_result = task_input['context'][0].output
         return agent.run({
-            'technology': initial_technology,
+            'value': initial_technology,
             'scraped_content': verification_result.get('content', '')
         })
 
-    normalize_task = normalize_technology_task(tech_normalization_agent, initial_technology)
+    normalize_task = normalize_technology_task(tech_normalization_agent, {
+        "value": initial_technology
+    })
     normalize_task.context = [verify_task]
     normalize_task._output = normalize_with_context
 
     def query_with_context(agent, task_input):
         verification_result = task_input['context'][1].output
         normalization_result = task_input['context'][0].output
-        return agent.update_technology_relationships({
-            'technology': normalization_result.get('normalized_tech', initial_technology),
-            'scraped_content': verification_result.get('content', '')
-        })
+        return agent.update_technology_relationships(
+            normalization_result.get('normalized_tech', initial_technology)
+        )
 
     query_task = query_graph_task(graph_query_agent, initial_technology)
     query_task.context = [normalize_task, verify_task]
