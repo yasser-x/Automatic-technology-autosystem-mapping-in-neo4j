@@ -4,7 +4,7 @@ def verify_technology_task(agent:TechVerificationAgent, technology):
     return Task(
         description=f"Verify if a '{technology}'exists by searching and analyzing web content",
         agent=agent,
-        expected_output="String indicating if the technology was verified",
+        expected_output="Dictionary with verification result and scraped content",
         function=agent.verify_technology,
         input=technology
     )

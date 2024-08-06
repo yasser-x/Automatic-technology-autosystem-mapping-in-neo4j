@@ -12,11 +12,11 @@ import logging
 from langchain_openai import ChatOpenAI
 import openai
 from pydantic import BaseModel, Field
-from typing import List, Any , Dict
+from typing import List, Any , Dict , Tuple , Union
 import uuid
 from langchain.prompts import PromptTemplate
 from googleapiclient.errors import HttpError
-
+from config import character_limit
 
 
 # Configure logging
@@ -40,25 +40,57 @@ USERNAME = "neo4j"
 PASSWORD = "pv4Fc667g__QSWQ62EXjk1ZDV_yxtRPFjfDiCSdPL_8"
 driver = GraphDatabase.driver(URI, auth=(USERNAME, PASSWORD))
 
+class TechnologyInputDict(BaseModel):
+    type: str = Field(..., description="Type of the input")
+    value: str = Field(..., description="Name of the technology")
+
 class TechVerificationAgent(Agent):
     def __init__(self, llm):
         super().__init__(
             name="Tech Verification Agent",
             role="Technology Verification Specialist",
-            goal="Verify if a technology exists by searching and analyzing web content",
+            goal="Check if technology exists in the graph and Verify if a technology exists by searching and analyzing web content",
             backstory="I am an agent specialized in verifying the existence of technologies by searching the web and analyzing content from the first web link to verify the technology",
             llm=llm,
             tools=[
                 Tool(
                     name="VerifyTechnology",
-                    func=self.verify_technology,
-                    description="Verify if a technology exists using web scraping from the first website rendered by Google custom search"
-                )
+                    func=self.verify_technology_wrapper,
+                    description="Verify if a technology exists using web scraping from the first website rendered by Google custom search",
+                ), 
+                Tool(
+                name="CheckTechnologyExists",
+                func=self.check_technology_exists_wrapper,
+                description="Check if a technology already exists in the graph",
+                
+            ),
             ]
         )
     API_KEY: str = 'AIzaSyA1wGvk8SzHKM_kRw507fSTBlBsZqApB3A'
     SEARCH_ENGINE_ID:str = "64ce969c078954e87"
 
+    class Config:
+        arbitrary_types_allowed = True
+        
+    def verify_technology_wrapper(self, input_data: Dict[str, str]) -> Dict[str, Any]:
+        tech_input = TechnologyInputDict(**input_data)
+        return self.verify_technology(tech_input.value)
+
+    def check_technology_exists_wrapper(self, input_data: Dict[str, str]) -> Tuple[bool, str]:
+        tech_input = TechnologyInputDict(**input_data)
+        return self.check_technology_exists(tech_input.value)
+
+    
+    def check_technology_exists(self, technology: str) -> Tuple[bool, str]:
+        with driver.session() as session:
+            result = session.run(
+                "MATCH (t:Technology {name: $name}) RETURN t",
+                name=technology
+            )
+            existing_tech = result.single()
+            if existing_tech:
+                return True, f"Technology '{technology}' already exists in the graph."
+            return False, f"Technology '{technology}' does not exist in the graph."
     @staticmethod
     def search_technology(technology: str):
         try:
@@ -78,7 +110,7 @@ class TechVerificationAgent(Agent):
             print(f"An error occurred during search: {e}")
             return None
 
-    def verify_technology(self, technology: str) -> str:
+    def verify_technology(self, technology:str) -> str:
         try:
             search_result = self.search_technology(technology)
             if not search_result:
@@ -91,9 +123,16 @@ class TechVerificationAgent(Agent):
             soup = BeautifulSoup(response.text, 'html.parser')
 
             paragraphs = soup.select('p:not(header p, nav p, footer p)')
-            paragraphs = paragraphs[:5]  # Limit to first 5 paragraphs
-            content = " ".join(paragraphs)
-
+            content = ""
+            for paragraph in paragraphs:
+                paragraph_text = paragraph.get_text().strip()
+                if len(content) + len(paragraph_text) + 1 <= character_limit:  # +1 for space
+                    content += paragraph_text + " "
+                else:
+                    remaining_chars = character_limit - len(content)
+                    content += paragraph_text[:remaining_chars]
+                    break
+                
             prompt_template = PromptTemplate(
                 input_variables=["technology", "content"],
                 template="""
@@ -118,18 +157,19 @@ class TechVerificationAgent(Agent):
             explanation = ' '.join(line for line in lines if not line.lower().startswith('yes') and not line.lower().startswith('no'))
 
             if is_tech:
-                return f"Verified: {technology}. {explanation}"
+                return {"verified": True, "message": f"Verified: {technology}. {explanation}", "content": content}
             else:
-                return f"Not verified: {technology}. {explanation}"
+                return {"verified": False, "message": f"Not verified: {technology}. {explanation}", "content": content}
 
         except requests.RequestException as e:
-            return f"Verification inconclusive: {technology} (Error scraping webpage: {str(e)})"
+            return {"verified": False, "message": f"Verification inconclusive: {technology} (Error scraping webpage: {str(e)})", "content": ""}
         except Exception as e:
-            return f"Verification failed: {technology} (Unexpected error: {str(e)})"
+            return {"verified": False, "message": f"Verification failed: {technology} (Unexpected error: {str(e)})", "content": ""}
 
-    def run(self, technology: str) -> dict:
-        result = self.verify_technology(technology)
-        return {"output": result}
+    def run(self, input_data: Dict[str, str]) -> dict:
+        tech_input = TechnologyInputDict(**input_data)
+        result = self.verify_technology(tech_input.value)
+        return result
 
         
 
@@ -150,7 +190,12 @@ class TechNormalizationAgent(Agent):
                     name="AddTechnologyToGraph",
                     func=self.add_technology_to_graph,
                     description="Add technology to the graph with associated category and use cases. Input should be a single string representing the technology name."
-                )
+                ),
+                Tool(
+                    name="NormalizeTechnology",
+                    func=self.normalize_tech,
+                    description="Normalize a technology name to its most commonly used format"
+                ),
             ]
         )
         self.categories = [
@@ -190,10 +235,12 @@ class TechNormalizationAgent(Agent):
             "Inventory Management Systems", "Point of Sale (POS) Systems", "Digital Publishing Platforms",
             "Music Production and Audio Engineering", "Video Streaming Services"
         ]
-    def normalize_tech(self, technology: str) -> str:
+    def normalize_tech(self, technology: str , scraped_content:str) -> str:
         prompt = f"""
         Normalize the following technology name to it's commonly known format:
         {technology}
+        Here's some context about the technology from a web search:
+        {scraped_content}
 
         Return only the normalized name without any additional explanation.
         """
@@ -202,12 +249,12 @@ class TechNormalizationAgent(Agent):
         return normalized_name
     
 
-    def add_technology_to_graph(self, technology: str) -> str:
+    def add_technology_to_graph(self, technology: str, scraped_content:str) -> str:
         if not isinstance(technology, str):
             raise ValueError("Technology must be a string")
         
         # Normalize the technology name
-        normalized_tech = self.normalize_tech(technology)
+        normalized_tech = self.normalize_tech(technology, scraped_content)
         # Determine relevant category and use cases
         relevant_category = self.get_relevant_category(normalized_tech)
         relevant_use_cases = self.get_relevant_use_cases(normalized_tech)
@@ -215,9 +262,19 @@ class TechNormalizationAgent(Agent):
         with driver.session() as session:
             # Check if the technology already exists
             result = session.run(
-                "MATCH (t:Technology {name: $name}) "
-                "RETURN t",
-                name=normalized_tech
+            """
+            MATCH (t:Technology {name: $name})
+            WHERE t.type IN [
+                'Programming Languages',
+                'Web Frameworks',
+                'Mobile App Frameworks',
+                'Frontend Libraries/Frameworks',
+                'Backend Frameworks',
+                'Full-Stack Frameworks'
+            ]
+            RETURN t
+            """,
+            name=normalized_tech
             )
             existing_tech = result.single()
             
@@ -244,10 +301,13 @@ class TechNormalizationAgent(Agent):
             print(message)
             return message
 
-    def get_relevant_category(self, technology: str) -> str:
+    def get_relevant_category(self, technology: str , scraped_content:str) -> str:
         prompt = f"""
         Given the technology '{technology}', which ONE of the following categories is most relevant?
         List of categories: {', '.join(self.categories)}
+
+        Here's some context about the technology from a web search:
+        {scraped_content}
         
         Please return only the name of the single most relevant category.
         """
@@ -255,10 +315,12 @@ class TechNormalizationAgent(Agent):
         print(response.strip())
         return response.strip()
 
-    def get_relevant_use_cases(self, technology: str) -> List[str]:
+    def get_relevant_use_cases(self, technology: str , scraped_content:str) -> List[str]:
         prompt = f"""
         Given the technology '{technology}', which of the following use cases are most relevant?
         List of use cases: {', '.join(self.use_cases)}
+        Here's some context about the technology from a web search:
+        {scraped_content}
         
         Please return only the names of the relevant use cases, separated by commas.
         """
@@ -268,8 +330,9 @@ class TechNormalizationAgent(Agent):
         return [case for case in relevant_use_cases if case in self.use_cases]
     @staticmethod
     def run(self, technology: str) -> Dict[str, Any]:
-        # This method is called by the CrewAI framework
-        result = self.add_technology_to_graph(technology)
+        technology = technology['technology']
+        scraped_content = technology.get('scraped_content', '')
+        result = self.add_technology_to_graph(technology, scraped_content)
         return {"output": result}
 class GraphQueryAgent(Agent, BaseModel):
     name: str = Field(default="Graph Query Agent")

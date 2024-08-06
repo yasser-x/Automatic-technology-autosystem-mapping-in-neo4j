@@ -1,4 +1,5 @@
 from crewai import Crew
+from crewai import Task
 from agents import (
     TechVerificationAgent,
     TechNormalizationAgent,
@@ -21,15 +22,28 @@ def run_tech_addition_pipeline(initial_technology):
     relationship_verification_agent = RelationshipVerificationAgent()
 
     verify_task = verify_technology_task(tech_verification_agent, initial_technology)
-    
+    def normalize_with_context(agent, task_input):
+        verification_result = task_input['context'][0].output
+        return agent.run({
+            'technology': initial_technology,
+            'scraped_content': verification_result.get('content', '')
+        })
+
     normalize_task = normalize_technology_task(tech_normalization_agent, initial_technology)
-    normalize_task.context = [verify_task]  
+    normalize_task.context = [verify_task]
+    normalize_task._output = normalize_with_context
+
+    def query_with_context(agent, task_input):
+        verification_result = task_input['context'][1].output
+        normalization_result = task_input['context'][0].output
+        return agent.update_technology_relationships({
+            'technology': normalization_result.get('normalized_tech', initial_technology),
+            'scraped_content': verification_result.get('content', '')
+        })
 
     query_task = query_graph_task(graph_query_agent, initial_technology)
-    query_task.context = [normalize_task]  # Set context as a list containing the previous task
-    
-    verify_relationship_task_instance = verify_relationship_task(relationship_verification_agent)
-    verify_relationship_task_instance.context = [query_task]  # Set context as a list containing the previous task
+    query_task.context = [normalize_task, verify_task]
+    query_task._output = query_with_context
 
     
 
@@ -51,6 +65,4 @@ def run_tech_addition_pipeline(initial_technology):
 # Run the crew
 
 if __name__ == "__main__":
-    initial_technology = input("Enter a technology to test: ")
-    result = run_tech_addition_pipeline(initial_technology)
-    print("Result:", result)
+    result = run_tech_addition_pipeline('Tensorflow')
