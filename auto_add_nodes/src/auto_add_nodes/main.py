@@ -1,4 +1,5 @@
 from crewai import Crew
+from fastapi import FastAPI
 from crewai import Task
 from agents import (
     TechVerificationAgent,
@@ -13,6 +14,13 @@ from tasks import (
     query_graph_task,
     verify_relationship_task
 )
+
+app = FastAPI()
+
+@app.post("/add-technology")
+async def add_technology(initial_technology: str):
+    result = run_tech_addition_pipeline(initial_technology)
+    return result
 
 def run_tech_addition_pipeline(initial_technology):
     # Instantiate agents
@@ -67,6 +75,7 @@ def run_tech_addition_pipeline(initial_technology):
     return crew.kickoff()
 
 # Run the crew
+
 
 if __name__ == "__main__":
     result = run_tech_addition_pipeline('Tensorflow')

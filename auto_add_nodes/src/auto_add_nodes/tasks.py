@@ -1,8 +1,13 @@
 from crewai import Task
 from agents import TechVerificationAgent, TechNormalizationAgent, RelationshipVerificationAgent, create_graph_query_agent , GraphQueryAgent
 def verify_technology_task(agent:TechVerificationAgent, technology_input):
+    if isinstance(technology_input, dict):
+        technology = technology_input.get('value', '')
+    else:
+        technology = technology_input
+
     return Task(
-        description=f"Verify if '{technology_input['value']}' exists by searching and analyzing web content",
+        description=f"Verify if '{technology}' exists by searching and analyzing web content",
         agent=agent,
         expected_output="Dictionary with verification result and scraped content",
         function=agent.verify_technology_wrapper,

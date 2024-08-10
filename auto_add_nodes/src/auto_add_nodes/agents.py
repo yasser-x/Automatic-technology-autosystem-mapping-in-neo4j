@@ -18,6 +18,9 @@ from langchain.prompts import PromptTemplate
 from googleapiclient.errors import HttpError
 from config import character_limit
 import traceback
+from urllib.request import urlopen
+import redis 
+from redis import RedisError
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -39,6 +42,14 @@ URI = "neo4j+s://a56c4909.databases.neo4j.io"
 USERNAME = "neo4j"
 PASSWORD = "pv4Fc667g__QSWQ62EXjk1ZDV_yxtRPFjfDiCSdPL_8"
 driver = GraphDatabase.driver(URI, auth=(USERNAME, PASSWORD))
+
+redis_client = redis.Redis(
+  host='eager-drake-47255.upstash.io',
+  port=6379,
+  password='AbiXAAIncDE4Mzc4NThlY2I3NjM0YTcxODQ4ZTlkZjVjMDc2MmE4ZHAxNDcyNTU',
+  ssl=True
+)
+REDIS_SET_KEY = 'technologies'  # The key for the set of technologies
 
 class TechnologyInputDict(BaseModel):
     type: str = Field(..., description="Type of the input")
@@ -84,37 +95,51 @@ class TechVerificationAgent(Agent):
                     "snippet": first_result.get("snippet", "")
                 }
             else:
+                logger.warning(f"No search results found for: {technology}")
                 return None
         except HttpError as e:
             print(f"An error occurred during search: {e}")
             return None
 
-    def fetch_content(self, url: str) -> Dict[str, Any]:
+    def fetch_content(self, url: str) -> str:
         try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
+            html = urlopen(url).read()
+            soup = BeautifulSoup(html, features="html.parser")
             
-            paragraphs = soup.select('p:not(header p, nav p, footer p)')
-            content = " ".join([p.get_text().strip() for p in paragraphs])
+            for script in soup(["script", "style"]):
+                script.extract()    # rip it out
             
-            return {"success": True, "content": content[:character_limit]}
+            content = soup.get_text()
+            # break into lines and remove leading and trailing space on each
+            lines = (line.strip() for line in content.splitlines())
+            # break multi-headlines into a line each
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            # drop blank lines
+            content = '\n'.join(chunk for chunk in chunks if chunk)
+
+            
+            return content
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            logger.error(f"Error fetching content from URL: {url}")
+            logger.error(traceback.format_exc())
+            return ""
 
     def verify_technology(self, technology: str) -> Dict[str, Any]:
+        logger.debug(f"verify_technology called with technology: {technology}")
         try:
             search_result = self.search_technology(technology)
             if not search_result:
+                logger.warning(f"No search results found for: {technology}")
                 return {"verified": False, "message": f"Not verified: {technology} (No search results found)", "content": ""}
 
             first_result_url = search_result['link']
-            content_result = self.fetch_content(first_result_url)
+            logger.debug(f"First result URL: {first_result_url}")
+            content = self.fetch_content(first_result_url)
             
-            if not content_result["success"]:
-                return {"verified": False, "message": f"Verification failed: {technology} (Error fetching content: {content_result['error']})", "content": ""}
+            if not content:
+                logger.error(f"Error fetching content: Empty content returned")
+                return {"verified": False, "message": f"Verification failed: {technology} (Error fetching content)", "content": ""}
 
-            content = content_result["content"]
 
             prompt_template = PromptTemplate(
                 input_variables=["technology", "content"],
@@ -147,22 +172,33 @@ class TechVerificationAgent(Agent):
         except Exception as e:
             return {"verified": False, "message": f"Verification failed: {technology} (Unexpected error: {str(e)})", "content": ""}
 
-    def verify_technology_wrapper(self, input_data: Dict[str, str]) -> Dict[str, Any]:
-        technology = input_data.get('value', '')
+    def verify_technology_wrapper(self, technology: str) -> Dict[str, Any]:
+        logger.debug(f"verify_technology_wrapper called with technology: {technology}")
+        
         if not technology:
+            logger.warning("No technology name provided")
             return {"verified": False, "message": "No technology name provided", "content": ""}
         
+        logger.info(f"Verifying technology: {technology}")
         return self.verify_technology(technology)
 
-    def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        technology = input_data.get('value', '')
+
+    def run(self, technology: str) -> Dict[str, Any]:
+        logger.debug(f"run method called with technology: {technology}")
+
         if not technology:
+            logger.warning("No technology name provided")
             return {"error": "No technology name provided"}
         
-        verify_result = self.verify_technology(technology)        
-        return {
-            "verification": verify_result
-        }
+        try:
+            verify_result = self.verify_technology(technology)
+            logger.info(f"Verification result: {verify_result}")
+            return {
+                "verification": verify_result
+            }
+        except Exception as e:
+            logger.exception(f"Error during verification of {technology}")
+            return {"error": f"Verification failed: {str(e)}"}
 
         
 
@@ -174,7 +210,7 @@ class TechNormalizationAgent(Agent):
         super().__init__(
             name="Tech Normalization Agent",
             role="Technology Normalization Expert",
-            goal="Normalize technology names, add them to the graph, and associate them with relevant category and use cases",
+            goal="Normalize technology names, add them to the neo4j grap and to the redis databse set  and associate them with relevant category and use cases",
             backstory="I am an agent specialized in standardizing technology names, adding them to the graph database, and associating them with relevant category and use cases.",
             llm=llm,
             tools=[
@@ -188,6 +224,11 @@ class TechNormalizationAgent(Agent):
                     name="NormalizeTechnology",
                     func=self.normalize_tech,
                     description="Normalize a technology name to its most commonly used format"
+                ),
+                Tool(
+                    name="AddTechToRedisSet",
+                    func=self.add_to_redis,
+                    description="Add technology to the Redis set. Input should be a single string representing the technology name."
                 ),
             ]
         )
@@ -253,17 +294,10 @@ class TechNormalizationAgent(Agent):
         relevant_use_cases = self.get_relevant_use_cases(normalized_tech)
         
         with driver.session() as session:
-            # Check if the technology already exists
             result = session.run(
             """
             MATCH (t:Technology {name: $name})
-            WHERE t.type IN [
-                'Programming Languages',
-                'Web Frameworks',
-                'Mobile App Frameworks',
-                'Frontend Libraries/Frameworks',
-                'Backend Frameworks',
-                'Full-Stack Frameworks'
+            WHERE t.name=$name
             ]
             RETURN t
             """,
@@ -275,7 +309,7 @@ class TechNormalizationAgent(Agent):
                 # Update category and use cases if the technology already exists
                 session.run(
                     "MATCH (t:Technology {name: $name}) "
-                    "SET t.category = $category, t.use_cases = $use_cases",
+                    "SET t.type = $category, t.use_cases = $use_cases",
                     name=normalized_tech,
                     category=relevant_category,
                     use_cases=relevant_use_cases
@@ -284,7 +318,7 @@ class TechNormalizationAgent(Agent):
             else:
                 # Create new technology node with category and use cases
                 session.run(
-                    "CREATE (t:Technology {id: $id,name: $name, category: $category, use_cases: $use_cases})",
+                    "CREATE (t:Technology {id: $id,name: $name, type: $category, use_cases: $use_cases})",
                     name=normalized_tech,
                     category=relevant_category,
                     use_cases=relevant_use_cases
@@ -293,6 +327,17 @@ class TechNormalizationAgent(Agent):
             
             print(message)
             return message
+    def add_to_redis(self, technology: str) -> bool:
+        try:
+            result = redis_client.sadd(REDIS_SET_KEY, technology)
+            if result == 1:
+                print(f"Added {technology} to Redis set {REDIS_SET_KEY}")
+            else:
+                print(f"{technology} was already in Redis set {REDIS_SET_KEY}")
+            return True
+        except RedisError as e:
+            print(f"Failed to add {technology} to Redis set: {str(e)}")
+            return False
 
     def get_relevant_category(self, technology: str , scraped_content:str) -> str:
         prompt = f"""
