@@ -32,7 +32,7 @@ def run_tech_addition_pipeline(initial_technology):
         "type": "technology_name",
         "value": initial_technology
     })
-    
+
     def normalize_with_context(agent, task_input):
         verification_result = task_input['context'][0].output
         return agent.run({
